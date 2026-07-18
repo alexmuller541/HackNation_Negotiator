@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Quote",
+  "description": "One structured call outcome. Every call produces exactly one of these — never a vague number.",
+  "type": "object",
+  "required": ["company", "call_id", "outcome"],
+  "properties": {
+    "company": { "type": "string" },
+    "call_id": { "type": "string" },
+    "outcome": { "enum": ["itemized_quote", "callback_commitment", "declined_documented"] },
+    "line_items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "amount"],
+        "properties": {
+          "label": { "type": "string" },
+          "amount": { "type": "number" },
+          "disclosed_voluntarily": { "type": "boolean" },
+          "negotiable": { "type": "boolean" }
+        }
+      }
+    },
+    "total": { "type": "number" },
+    "binding": { "type": "boolean" },
+    "conditions": { "type": "array", "items": { "type": "string" } },
+    "red_flags": { "type": "array", "items": { "type": "string" } },
+    "negotiation": {
+      "type": "object",
+      "properties": {
+        "initial_total": { "type": "number" },
+        "final_total": { "type": "number" },
+        "leverage_used": { "type": "array", "items": { "type": "string" } },
+        "transcript_refs": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "callback": {
+      "type": "object",
+      "properties": {
+        "contact_name": { "type": "string" },
+        "window": { "type": "string" }
+      }
+    },
+    "transcript_url": { "type": "string" },
+    "recording_url": { "type": "string" }
+  }
+}

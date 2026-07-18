@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JobSpec",
+  "description": "One structured job spec, produced identically by voice interview and document intake, confirmed by the user, reused verbatim on every call.",
+  "type": "object",
+  "required": ["origin", "destination", "move", "inventory", "services", "confirmed_by_user"],
+  "properties": {
+    "origin": { "$ref": "#/$defs/location" },
+    "destination": { "$ref": "#/$defs/location" },
+    "move": {
+      "type": "object",
+      "required": ["distance_miles", "move_date"],
+      "properties": {
+        "distance_miles": { "type": "number" },
+        "move_date": { "type": "string", "format": "date" },
+        "flexibility_days": { "type": "integer", "default": 0 }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "required": ["large_items", "boxes_estimate"],
+      "properties": {
+        "large_items": { "type": "array", "items": { "type": "string" } },
+        "boxes_estimate": { "type": "integer" },
+        "boxes_is_estimate": { "type": "boolean", "default": true },
+        "fragile_items": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "services": {
+      "type": "object",
+      "properties": {
+        "packing": { "enum": ["none", "partial", "full"] },
+        "disassembly": { "type": "boolean" },
+        "insurance": { "enum": ["basic", "full_value"] }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } },
+    "confirmed_by_user": { "type": "boolean" },
+    "intake_source": { "enum": ["voice_interview", "document", "both"] }
+  },
+  "$defs": {
+    "location": {
+      "type": "object",
+      "required": ["address", "home_type", "floor"],
+      "properties": {
+        "address": { "type": "string" },
+        "home_type": { "enum": ["apartment", "house", "storage_unit"] },
+        "bedrooms": { "type": "integer" },
+        "floor": { "type": "integer" },
+        "elevator": { "type": "boolean" },
+        "stairs_flights": { "type": "integer" },
+        "parking_distance_ft": { "type": "integer" }
+      }
+    }
+  }
+}
