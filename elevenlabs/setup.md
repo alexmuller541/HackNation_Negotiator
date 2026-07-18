@@ -1,5 +1,9 @@
 # ElevenLabs Dashboard Setup (phone-friendly, Alex's lane)
 
+> **STATUS: DONE PROGRAMMATICALLY (2026-07-18).** `create_agents.py` created both agents and all four webhook tools via the API — IDs in [created.json](created.json). Talk to the caller agent: `https://elevenlabs.io/app/talk-to?agent_id=<agent_caller id>`. The steps below remain as reference for editing in the dashboard.
+>
+> **Person D:** the four tools point at placeholder URLs (`backend-placeholder.negotiator.example`) — update each tool's URL via dashboard or API once the backend is deployed. Voice is the stock demo voice; pick better ones in the dashboard (free).
+
 All of this is **free to configure** — only conversation minutes burn credits. Do the full setup before dialing anything.
 
 ## Agent 1: The Interviewer (intake)

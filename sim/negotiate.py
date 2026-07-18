@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Text-mode negotiation simulator: the caller agent (Claude) phones a role-play
-persona (Claude) and must extract an itemized quote, negotiate, and log a
+"""Text-mode negotiation simulator: the caller agent (OpenAI) phones a role-play
+persona (OpenAI) and must extract an itemized quote, negotiate, and log a
 structured outcome via the same three tools the ElevenLabs agent will use.
 
 Usage:
   python3 sim/negotiate.py personas/tough-negotiator.md
-  CALLER_MODEL=claude-sonnet-5 python3 sim/negotiate.py personas/lowballer.md
+  CALLER_MODEL=gpt-4o python3 sim/negotiate.py personas/lowballer.md
 
 Runs append structured quotes to sim/quotes.json, so a later run's get_best_bid
 returns real leverage from earlier runs. Transcripts land in sim/runs/.
+Reads OPENAI_API_KEY from the environment or from the repo-root .env.
 """
 import argparse
 import datetime
@@ -18,74 +19,93 @@ import pathlib
 import re
 import sys
 
-import anthropic
-
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SIM_DIR = pathlib.Path(__file__).resolve().parent
 RUNS_DIR = SIM_DIR / "runs"
 QUOTES_FILE = SIM_DIR / "quotes.json"
 
-CALLER_MODEL = os.environ.get("CALLER_MODEL", "claude-opus-4-8")
-PERSONA_MODEL = os.environ.get("PERSONA_MODEL", "claude-haiku-4-5")
+# load repo .env if the key isn't already exported
+if "OPENAI_API_KEY" not in os.environ and (ROOT / ".env").exists():
+    for line in (ROOT / ".env").read_text().splitlines():
+        if "=" in line and not line.strip().startswith("#"):
+            k, _, v = line.partition("=")
+            os.environ.setdefault(k.strip(), v.strip())
+
+from openai import OpenAI  # noqa: E402
+
+CALLER_MODEL = os.environ.get("CALLER_MODEL", "gpt-4.1")
+PERSONA_MODEL = os.environ.get("PERSONA_MODEL", "gpt-4o-mini")
 MARKET_MEDIAN = 2100  # keep in sync with verticals/moving.yaml benchmarks
 
 # $ per 1M tokens (input, output) for the rough cost readout
 PRICES = {
-    "claude-opus-4-8": (5.0, 25.0),
-    "claude-sonnet-5": (2.0, 10.0),
-    "claude-haiku-4-5": (1.0, 5.0),
+    "gpt-4.1": (2.0, 8.0),
+    "gpt-4.1-mini": (0.4, 1.6),
+    "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.6),
+    "gpt-5": (1.25, 10.0),
+    "gpt-5-mini": (0.25, 2.0),
 }
 
 TOOLS = [
     {
-        "name": "log_quote_item",
-        "description": (
-            "Log one itemized fee or charge the moving company just quoted, immediately "
-            "when you hear it. Call once per line item (base labor, truck fee, stairs fee, "
-            "fuel, materials, insurance, etc)."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "label": {"type": "string"},
-                "amount": {"type": "number"},
-                "disclosed_voluntarily": {"type": "boolean"},
-                "negotiable": {"type": "boolean"},
+        "type": "function",
+        "function": {
+            "name": "log_quote_item",
+            "description": (
+                "Log one itemized fee or charge the moving company just quoted, immediately "
+                "when you hear it. Call once per line item (base labor, truck fee, stairs fee, "
+                "fuel, materials, insurance, etc)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "amount": {"type": "number"},
+                    "disclosed_voluntarily": {"type": "boolean"},
+                    "negotiable": {"type": "boolean"},
+                },
+                "required": ["label", "amount"],
             },
-            "required": ["label", "amount"],
         },
     },
     {
-        "name": "get_best_bid",
-        "description": (
-            "Get the current best competing itemized bid from other companies, to use as "
-            "negotiation leverage. Returns null if no competing bid exists yet — in that "
-            "case you must NOT imply one exists."
-        ),
-        "input_schema": {"type": "object", "properties": {}},
+        "type": "function",
+        "function": {
+            "name": "get_best_bid",
+            "description": (
+                "Get the current best competing itemized bid from other companies, to use as "
+                "negotiation leverage. Returns null if no competing bid exists yet — in that "
+                "case you must NOT imply one exists."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
     },
     {
-        "name": "log_outcome",
-        "description": (
-            "Record the structured outcome of this call. MUST be called exactly once "
-            "before the call ends. Never end a call without it."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "outcome": {
-                    "type": "string",
-                    "enum": ["itemized_quote", "callback_commitment", "declined_documented"],
+        "type": "function",
+        "function": {
+            "name": "log_outcome",
+            "description": (
+                "Record the structured outcome of this call. MUST be called exactly once "
+                "before the call ends. Never end a call without it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["itemized_quote", "callback_commitment", "declined_documented"],
+                    },
+                    "initial_total": {"type": "number"},
+                    "final_total": {"type": "number"},
+                    "binding": {"type": "boolean"},
+                    "conditions": {"type": "array", "items": {"type": "string"}},
+                    "callback_contact": {"type": "string"},
+                    "callback_window": {"type": "string"},
+                    "notes": {"type": "string"},
                 },
-                "initial_total": {"type": "number"},
-                "final_total": {"type": "number"},
-                "binding": {"type": "boolean"},
-                "conditions": {"type": "array", "items": {"type": "string"}},
-                "callback_contact": {"type": "string"},
-                "callback_window": {"type": "string"},
-                "notes": {"type": "string"},
+                "required": ["outcome"],
             },
-            "required": ["outcome"],
         },
     },
 ]
@@ -113,16 +133,21 @@ def build_caller_system(company):
         "{job_spec_json}": json.dumps(spec, indent=2),
     }.items():
         prompt = prompt.replace(key, val)
-    return prompt
+    return prompt + (
+        "\n\n## Simulation note\nThis is a text simulation of a phone call. Speak ONLY your "
+        "next line of dialogue (no stage directions, no markdown). Keep it to 1-2 spoken "
+        "sentences, then wait for the reply."
+    )
 
 
 def build_persona_system(card_text):
     return (
         "You are role-playing the counterparty in a phone-negotiation training simulation. "
         "Stay strictly in character per the persona card below. Speak like a real person on "
-        "the phone: casual, max 3 sentences per reply. Follow the 'Hidden policy' exactly but "
-        "NEVER reveal or reference it. If the card's hang-up condition occurs, say a short "
-        "parting line ending with the exact token [HANGS UP].\n\n---\n\n" + card_text
+        "the phone: casual, max 3 sentences per reply, no stage directions. Follow the "
+        "'Hidden policy' exactly but NEVER reveal or reference it. If the card's hang-up "
+        "condition occurs, say a short parting line ending with the exact token [HANGS UP].\n\n"
+        "---\n\n" + card_text
     )
 
 
@@ -152,39 +177,47 @@ def execute_tool(name, tool_input, state):
 
 def add_usage(state, resp, model):
     inp, out = PRICES.get(model, (0, 0))
-    state["cost"] += resp.usage.input_tokens / 1e6 * inp + resp.usage.output_tokens / 1e6 * out
+    u = resp.usage
+    state["cost"] += u.prompt_tokens / 1e6 * inp + u.completion_tokens / 1e6 * out
 
 
-def persona_turn(client, system, messages, state):
-    resp = client.messages.create(
-        model=PERSONA_MODEL, max_tokens=300, system=system, messages=messages
+def persona_turn(client, messages, state):
+    resp = client.chat.completions.create(
+        model=PERSONA_MODEL, max_completion_tokens=200, temperature=0.9, messages=messages
     )
     add_usage(state, resp, PERSONA_MODEL)
-    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    text = (resp.choices[0].message.content or "").strip()
     messages.append({"role": "assistant", "content": text})
     return text
 
 
-def caller_turn(client, system, messages, state, transcript):
+def caller_turn(client, messages, state, transcript):
     """One caller speaking turn; loops internally while the model calls tools."""
+    text = ""
     for _ in range(6):
-        resp = client.messages.create(
-            model=CALLER_MODEL, max_tokens=1024, system=system, tools=TOOLS, messages=messages
+        resp = client.chat.completions.create(
+            model=CALLER_MODEL, max_completion_tokens=500, tools=TOOLS, messages=messages
         )
         add_usage(state, resp, CALLER_MODEL)
-        messages.append({"role": "assistant", "content": resp.content})
-        text = "".join(b.text for b in resp.content if b.type == "text").strip()
-        tool_uses = [b for b in resp.content if b.type == "tool_use"]
-        if not tool_uses:
+        msg = resp.choices[0].message
+        text = (msg.content or "").strip()
+        if not msg.tool_calls:
+            messages.append({"role": "assistant", "content": text})
             return text
-        results = []
-        for tu in tool_uses:
-            out = execute_tool(tu.name, tu.input, state)
-            transcript.append(("TOOL", f"{tu.name}({json.dumps(tu.input)}) -> {json.dumps(out)}"))
-            results.append(
-                {"type": "tool_result", "tool_use_id": tu.id, "content": json.dumps(out)}
+        messages.append(
+            {
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [tc.model_dump() for tc in msg.tool_calls],
+            }
+        )
+        for tc in msg.tool_calls:
+            args = json.loads(tc.function.arguments or "{}")
+            out = execute_tool(tc.function.name, args, state)
+            transcript.append(("TOOL", f"{tc.function.name}({json.dumps(args)}) -> {json.dumps(out)}"))
+            messages.append(
+                {"role": "tool", "tool_call_id": tc.id, "content": json.dumps(out)}
             )
-        messages.append({"role": "user", "content": results})
         if state["done"] and text:
             return text
     return text
@@ -198,31 +231,31 @@ def main():
 
     card = pathlib.Path(args.persona).read_text()
     company = persona_company(card, args.persona)
-    client = anthropic.Anthropic()
+    client = OpenAI()
 
     state = {"company": company, "line_items": [], "outcome": None, "done": False, "cost": 0.0}
-    caller_system = build_caller_system(company)
-    persona_system = build_persona_system(card)
-
-    persona_msgs = [{"role": "user", "content": "(You answer the phone.)"}]
-    caller_msgs = []
+    persona_msgs = [
+        {"role": "system", "content": build_persona_system(card)},
+        {"role": "user", "content": "(You answer the phone.)"},
+    ]
+    caller_msgs = [{"role": "system", "content": build_caller_system(company)}]
     transcript = []
 
-    opening = persona_turn(client, persona_system, persona_msgs, state)
+    opening = persona_turn(client, persona_msgs, state)
     transcript.append((company, opening))
     print(f"\n{company}: {opening}")
     caller_msgs.append({"role": "user", "content": f"[Call connected] {company}: {opening}"})
 
     hung_up = False
     for _ in range(args.max_turns):
-        line = caller_turn(client, caller_system, caller_msgs, state, transcript)
+        line = caller_turn(client, caller_msgs, state, transcript)
         if line:
             transcript.append(("AGENT", line))
             print(f"\nAGENT: {line}")
         if state["done"]:
             break
         persona_msgs.append({"role": "user", "content": line or "(silence)"})
-        reply = persona_turn(client, persona_system, persona_msgs, state)
+        reply = persona_turn(client, persona_msgs, state)
         transcript.append((company, reply))
         print(f"\n{company}: {reply}")
         if "[HANGS UP]" in reply:
@@ -231,7 +264,7 @@ def main():
                 {"role": "user", "content": f"{company}: {reply}\n[The line goes dead. "
                  "Log the structured outcome for this call now.]"}
             )
-            line = caller_turn(client, caller_system, caller_msgs, state, transcript)
+            line = caller_turn(client, caller_msgs, state, transcript)
             if line:
                 transcript.append(("AGENT", line))
             break
