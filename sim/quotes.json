@@ -181,5 +181,15 @@
       "$2,160 applies if booked for a weekday or mid-month date; otherwise, original fees apply"
     ],
     "notes": "$200 fuel fee waived if mid-month or weekday. Competing bid was $1,850 from White Glove Relocations. Breakdown: $1,800 labor/truck, $300 stairs, $100 materials. No packing; disassembly included; basic insurance assumed."
+  },
+  {
+    "company": "front desk, Carolina Van Lines",
+    "call_id": "20260718-213737",
+    "line_items": [],
+    "red_flags": [],
+    "outcome": "callback_commitment",
+    "callback_contact": "unknown",
+    "callback_window": "tomorrow between 9 and 11",
+    "notes": "Company does not provide quotes by phone; promised callback within time window without specifying a contact name."
   }
 ]
