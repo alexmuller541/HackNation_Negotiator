@@ -1,0 +1,6 @@
+# Intake backend deps (Aleks's /intake/doc + /specs endpoints)
+fastapi
+anthropic
+supabase
+pydantic>=2
+python-multipart   # required by FastAPI for UploadFile / multipart form uploads
