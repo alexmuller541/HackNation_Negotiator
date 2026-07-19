@@ -1,0 +1,69 @@
+# Vertical config — Home Cleaning (residential)
+# Switching verticals should mean swapping this file, not rewriting agents.
+vertical: cleaning
+display_name: "Home Cleaning (residential)"
+
+# --- Job spec (mirrors the JobSpec Pydantic models in backend/intake_router.py) ---
+spec_fields:
+  property: [type, sqft, bedrooms, bathrooms, levels]
+  clean_type: [standard, deep, move_out]          # one of
+  frequency: [one_time, weekly, biweekly, monthly] # one of
+  condition: [clutter_level, pets, weeks_since_last_clean]
+  add_ons: [fridge, oven, windows, baseboards, laundry]
+  access: [parking, entry, walk_up_floor]
+  schedule: [preferred_date, flexibility_days, time_window]
+
+interview_questions:
+  - "Is it a house or an apartment/condo — and roughly how many square feet, or how many bedrooms and bathrooms?"
+  - "How many levels or floors inside the unit?"
+  - "Standard clean, deep clean, or move-out? (First time with a service usually gets priced as a deep clean.)"
+  - "One-time, or recurring — weekly, every two weeks, or monthly?"
+  - "How cluttered is the space — light, moderate, heavy? Any pets? Roughly how long since the last professional clean?"
+  - "Any add-ons: inside the fridge, inside the oven, interior windows, baseboards, laundry?"
+  - "Where do cleaners park and how do they get in — lockbox, doorman, or you meet them? If there are stairs and no elevator, what floor?"
+  - "What date works, how flexible is it, and any preferred time of day?"
+
+# --- Benchmarks (2026 US medians; per clean type) ---
+benchmarks:
+  source: "2026 US residential cleaning medians — verify before the demo"
+  standard: { low: 120, median: 180, high: 280 }
+  deep:     { low: 200, median: 300, high: 500 }
+  move_out: { low: 250, median: 400, high: 600 }
+  hourly_per_cleaner: { low: 45, high: 75 }
+  recurring_discount:
+    weekly: "20-25%"
+    biweekly: "10-15%"
+
+# --- Red-flag rules ---
+red_flags:
+  - id: lowball
+    rule: "total <= 0.70 * benchmarks[clean_type].median"
+    message: "30%+ below the median for this clean type — industry guidance treats this as a warning, not a win"
+  - id: standard_on_first_time
+    rule: "clean_type == standard AND condition.weeks_since_last_clean is null/large (first-time job)"
+    message: "First cleans are market-priced as deep — a standard quote here signals an on-arrival upcharge"
+  - id: uncapped_hourly
+    rule: "pricing_model == hourly AND no estimated total / no cap"
+    message: "Open-ended hourly with no cap — the moving-day surprise of cleaning"
+  - id: no_itemization
+    rule: "refuses itemization after two requests"
+    message: "Won't break out fees — on-arrival surprises likely"
+  - id: cash_only
+    rule: "requires cash / refuses a written quote"
+    message: "Cash-only, no-paper quotes correlate with bait-and-switch"
+
+# --- Negotiation levers (Closer / Round 2) ---
+negotiation_levers:
+  - id: competing_bid
+    line: "I have an itemized quote at ${best_bid} for this exact job — can you beat it?"
+    constraint: "only cite the exact amount returned by get_best_bid; never imply a bid that doesn't exist"
+  - id: recurring_commitment
+    line: "The customer can commit to biweekly — does that unlock a recurring rate?"
+    constraint: "biweekly ~10-15% off, weekly ~20-25% off"
+  - id: bundle_addons
+    line: "If the price is firm, can you include the inside-oven and interior windows at that rate?"
+  - id: off_peak
+    line: "The customer's flexible on the date — does a weekday or a slower slot change the price?"
+    constraint: "only if schedule.flexibility_days > 0"
+
+call_outcomes: [quote, callback, declined]

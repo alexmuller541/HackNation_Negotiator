@@ -1,0 +1,8 @@
+# Intake backend deps (Aleks's /intake/doc + /specs endpoints)
+fastapi
+openai
+supabase
+pydantic>=2
+python-multipart   # required by FastAPI for UploadFile / multipart form uploads
+uvicorn            # ASGI server to run backend/main.py locally
+python-dotenv      # backend/main.py loads the repo-root .env
