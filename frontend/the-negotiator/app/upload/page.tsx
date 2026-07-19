@@ -22,7 +22,8 @@ export default function UploadPage() {
       const { jobId } = await uploadJobDocument(file);
       router.push(`/processing?job=${jobId}`);
     } catch (e) {
-      setError("Upload failed. Please try again.");
+      const detail = e instanceof Error ? e.message : "Please try again.";
+      setError(`Upload failed: ${detail}`);
       setSubmitting(false);
     }
   }
