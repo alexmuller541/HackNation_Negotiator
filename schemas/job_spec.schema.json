@@ -1,56 +1,62 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "JobSpec",
-  "description": "One structured job spec, produced identically by voice interview and document intake, confirmed by the user, reused verbatim on every call.",
+  "description": "One structured cleaning job spec, confirmed by the user, reused verbatim on every call.",
   "type": "object",
-  "required": ["origin", "destination", "move", "inventory", "services", "confirmed_by_user"],
+  "required": ["property", "clean_type", "frequency", "condition", "add_ons", "access", "schedule", "confirmed_by_user"],
   "properties": {
-    "origin": { "$ref": "#/$defs/location" },
-    "destination": { "$ref": "#/$defs/location" },
-    "move": {
+    "property": {
       "type": "object",
-      "required": ["distance_miles", "move_date"],
+      "required": ["type", "sqft", "bedrooms", "bathrooms", "levels"],
       "properties": {
-        "distance_miles": { "type": "number" },
-        "move_date": { "type": "string", "format": "date" },
-        "flexibility_days": { "type": "integer", "default": 0 }
+        "type": { "enum": ["apartment", "house", "condo", "townhouse"] },
+        "sqft": { "type": "integer" },
+        "bedrooms": { "type": "integer" },
+        "bathrooms": { "type": "number" },
+        "levels": { "type": "integer", "default": 1 }
       }
     },
-    "inventory": {
+    "clean_type": { "enum": ["standard", "deep", "move_out"] },
+    "frequency": { "enum": ["one_time", "weekly", "biweekly", "monthly"] },
+    "condition": {
       "type": "object",
-      "required": ["large_items", "boxes_estimate"],
+      "required": ["clutter_level", "has_pets", "weeks_since_last_clean"],
       "properties": {
-        "large_items": { "type": "array", "items": { "type": "string" } },
-        "boxes_estimate": { "type": "integer" },
-        "boxes_is_estimate": { "type": "boolean", "default": true },
-        "fragile_items": { "type": "array", "items": { "type": "string" } }
+        "clutter_level": { "enum": ["low", "medium", "high"] },
+        "has_pets": { "type": "boolean" },
+        "weeks_since_last_clean": { "type": "integer" }
       }
     },
-    "services": {
+    "add_ons": {
       "type": "object",
       "properties": {
-        "packing": { "enum": ["none", "partial", "full"] },
-        "disassembly": { "type": "boolean" },
-        "insurance": { "enum": ["basic", "full_value"] }
+        "fridge": { "type": "boolean", "default": false },
+        "oven": { "type": "boolean", "default": false },
+        "windows": { "type": "boolean", "default": false },
+        "baseboards": { "type": "boolean", "default": false },
+        "laundry": { "type": "boolean", "default": false }
+      }
+    },
+    "access": {
+      "type": "object",
+      "required": ["parking", "entry_method", "walk_up_floor"],
+      "properties": {
+        "parking": { "enum": ["street", "driveway", "garage", "metered"] },
+        "entry_method": { "type": "string" },
+        "walk_up_floor": { "type": "integer", "default": 0 }
+      }
+    },
+    "schedule": {
+      "type": "object",
+      "required": ["preferred_date", "preferred_time_window"],
+      "properties": {
+        "preferred_date": { "type": "string", "format": "date" },
+        "preferred_time_window": { "type": "string" },
+        "flexibility": { "type": "string" }
       }
     },
     "open_questions": { "type": "array", "items": { "type": "string" } },
     "confirmed_by_user": { "type": "boolean" },
     "intake_source": { "enum": ["voice_interview", "document", "both"] }
-  },
-  "$defs": {
-    "location": {
-      "type": "object",
-      "required": ["address", "home_type", "floor"],
-      "properties": {
-        "address": { "type": "string" },
-        "home_type": { "enum": ["apartment", "house", "storage_unit"] },
-        "bedrooms": { "type": "integer" },
-        "floor": { "type": "integer" },
-        "elevator": { "type": "boolean" },
-        "stairs_flights": { "type": "integer" },
-        "parking_distance_ft": { "type": "integer" }
-      }
-    }
   }
 }
