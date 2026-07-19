@@ -20,14 +20,24 @@ if os.path.exists(ENV_PATH):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+                # Permit human-friendly inline comments in local .env files without
+                # accidentally appending them to an API key.
+                value = v.strip().split(" #", 1)[0].rstrip()
+                os.environ.setdefault(k.strip(), value)
 
 # Supabase Client Initialization
 SUPABASE_URL = os.environ.get("VITE_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("VITE_SUPABASE_PUBLISHABLE_KEY") or os.environ.get("SUPABASE_KEY")
+SUPABASE_KEY = (
+    os.environ.get("SUPABASE_SERVICE_KEY")
+    or os.environ.get("SUPABASE_KEY")
+    or os.environ.get("VITE_SUPABASE_PUBLISHABLE_KEY")
+)
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("Supabase credentials missing. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in .env")
+    raise RuntimeError(
+        "Supabase credentials missing. Set SUPABASE_URL and SUPABASE_SERVICE_KEY in .env "
+        "(or SUPABASE_KEY for a legacy setup)."
+    )
 
 try:
     supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -230,298 +240,170 @@ def from_spec_db(spec: Spec) -> dict:
     return from_flat_spec(spec.__dict__)
 
 
-# --- Unified Wrapper Interface (Supabase only) ---
+# --- Unified Wrapper Interface (Supabase's live JSON-spec schema) ---
+
+def _spec_from_row(row: dict) -> dict:
+    spec = dict(row.get("spec") or {})
+    spec.update({
+        "id": str(row["id"]),
+        "confirmed_by_user": row.get("confirmed_by_user", False),
+        "intake_source": row.get("intake_source") or spec.get("intake_source") or "voice_interview",
+        "open_questions": spec.get("open_questions") or row.get("missing_fields") or [],
+        "created_at": row.get("created_at"),
+    })
+    return spec
 
 def db_create_spec(data: dict) -> dict:
-    spec_id = f"spec_{uuid.uuid4().hex[:8]}"
-    flat_data = to_flat_spec(spec_id, data)
-    supabase_client.table("specs").insert(flat_data).execute()
-    return from_flat_spec(flat_data)
+    spec_id = str(uuid.uuid4())
+    spec = dict(data)
+    spec["confirmed_by_user"] = False
+    row = {
+        "id": spec_id,
+        "spec": spec,
+        "clean_type": spec.get("clean_type"),
+        "intake_source": spec.get("intake_source", "voice_interview"),
+        "confirmed_by_user": False,
+        "missing_fields": spec.get("open_questions") or [],
+    }
+    supabase_client.table("specs").insert(row).execute()
+    return _spec_from_row(row)
 
 def db_get_spec(spec_id: str) -> Optional[dict]:
     resp = supabase_client.table("specs").select("*").eq("id", spec_id).execute()
-    if not resp.data:
+    return _spec_from_row(resp.data[0]) if resp.data else None
+
+def db_update_spec(spec_id: str, data: dict) -> Optional[dict]:
+    if not db_get_spec(spec_id):
         return None
-    return from_flat_spec(resp.data[0])
+    spec = dict(data)
+    spec["confirmed_by_user"] = False
+    supabase_client.table("specs").update({
+        "spec": spec,
+        "clean_type": spec.get("clean_type"),
+        "intake_source": spec.get("intake_source", "voice_interview"),
+        "missing_fields": spec.get("open_questions") or [],
+    }).eq("id", spec_id).execute()
+    return db_get_spec(spec_id)
 
 def db_confirm_spec(spec_id: str) -> dict:
-    # Update confirmed flag
-    supabase_client.table("specs").update({"confirmed_by_user": True}).eq("id", spec_id).execute()
-    spec_resp = supabase_client.table("specs").select("*").eq("id", spec_id).execute()
-    if not spec_resp.data:
+    spec = db_get_spec(spec_id)
+    if not spec:
         raise Exception("Spec not found")
-    spec_data = from_flat_spec(spec_resp.data[0])
-    
-    # Auto queue calls for all companies
-    companies_resp = supabase_client.table("companies").select("*").execute()
-    for company in companies_resp.data:
-        existing_call = supabase_client.table("calls").select("*").eq("spec_id", spec_id).eq("company_id", company["id"]).execute()
-        if not existing_call.data:
-            supabase_client.table("calls").insert({
-                "id": f"call_{uuid.uuid4().hex[:8]}",
-                "spec_id": spec_id,
-                "company_id": company["id"],
-                "status": "queued",
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat()
-            }).execute()
-    return spec_data
+    spec["confirmed_by_user"] = True
+    supabase_client.table("specs").update({"confirmed_by_user": True, "spec": spec}).eq("id", spec_id).execute()
+    for company in supabase_client.table("companies").select("*").execute().data:
+        existing = supabase_client.table("calls").select("id").eq("spec_id", spec_id).eq("company_id", company["id"]).execute()
+        if not existing.data:
+            supabase_client.table("calls").insert({"id": str(uuid.uuid4()), "spec_id": spec_id, "company_id": company["id"], "status": "queued"}).execute()
+    return db_get_spec(spec_id)
 
 def db_start_call(spec_id: str, company_id: str) -> dict:
-    # Verify call exists or create
-    call_resp = supabase_client.table("calls").select("*").eq("spec_id", spec_id).eq("company_id", company_id).execute()
-    if call_resp.data:
-        call = call_resp.data[0]
+    response = supabase_client.table("calls").select("*").eq("spec_id", spec_id).eq("company_id", company_id).execute()
+    if response.data:
+        call = response.data[0]
         call_id = call["id"]
-        supabase_client.table("calls").update({
-            "status": "calling",
-            "updated_at": datetime.utcnow().isoformat()
-        }).eq("id", call_id).execute()
+        supabase_client.table("calls").update({"status": "calling", "updated_at": datetime.utcnow().isoformat()}).eq("id", call_id).execute()
     else:
-        call_id = f"call_{uuid.uuid4().hex[:8]}"
-        supabase_client.table("calls").insert({
-            "id": call_id,
-            "spec_id": spec_id,
-            "company_id": company_id,
-            "status": "calling",
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
-        }).execute()
-    
-    comp_resp = supabase_client.table("companies").select("*").eq("id", company_id).execute()
-    comp_name = comp_resp.data[0]["name"] if comp_resp.data else "Unknown"
-    return {
-        "call_id": call_id,
-        "spec_id": spec_id,
-        "company_id": company_id,
-        "company_name": comp_name,
-        "status": "calling"
-    }
+        call_id = str(uuid.uuid4())
+        supabase_client.table("calls").insert({"id": call_id, "spec_id": spec_id, "company_id": company_id, "status": "calling"}).execute()
+    company = supabase_client.table("companies").select("name").eq("id", company_id).execute().data
+    return {"call_id": call_id, "spec_id": spec_id, "company_id": company_id, "company_name": company[0]["name"] if company else "Unknown", "status": "calling"}
 
 def db_get_calls(spec_id: str) -> List[Dict[str, Any]]:
-    calls_resp = supabase_client.table("calls").select("*").eq("spec_id", spec_id).execute()
-    companies_resp = supabase_client.table("companies").select("*").execute()
-    comp_map = {c["id"]: c for c in companies_resp.data}
-    
-    results = []
-    for call in calls_resp.data:
-        company = comp_map.get(call["company_id"], {"name": "Unknown", "persona": "Unknown"})
-        quote_resp = supabase_client.table("quotes").select("*").eq("call_id", call["id"]).execute()
+    calls = supabase_client.table("calls").select("*").eq("spec_id", spec_id).execute().data
+    companies = {row["id"]: row for row in supabase_client.table("companies").select("*").execute().data}
+    results: List[Dict[str, Any]] = []
+    for call in calls:
+        company = companies.get(call["company_id"], {"name": "Unknown", "persona": "Unknown"})
+        quote_rows = supabase_client.table("quotes").select("*").eq("call_id", call["id"]).execute().data
         quote_data = None
-        if quote_resp.data:
-            q = quote_resp.data[0]
-            items_resp = supabase_client.table("quote_items").select("*").eq("quote_id", q["id"]).execute()
+        if quote_rows:
+            quote = quote_rows[0]
+            items = supabase_client.table("quote_items").select("*").eq("call_id", call["id"]).execute().data
+            line_items = [{"label": item["label"], "amount": float(item["amount"])} for item in items]
+            total = quote.get("final_total") or sum(item["amount"] for item in line_items)
             quote_data = {
-                "id": q["id"],
-                "outcome": q["outcome"],
-                "pricing_model": q.get("pricing_model"),
-                "total": q.get("total"),
-                "opening_total": q.get("opening_total"),
-                "final_total": q.get("final_total"),
-                "moved_because": q.get("moved_because"),
-                "red_flags": q.get("red_flags") or [],
-                "red_flag_reasons": q.get("red_flag_reasons") or [],
-                "line_items": [{"label": item["label"], "amount": item["amount"]} for item in items_resp.data]
+                "id": quote["id"], "outcome": quote["outcome"], "pricing_model": quote.get("pricing_model"),
+                "total": float(total) if total is not None else None, "opening_total": quote.get("initial_total"),
+                "final_total": quote.get("final_total"), "conditions": quote.get("conditions") or [],
+                "red_flags": quote.get("red_flags") or [], "red_flag_reasons": [], "notes": quote.get("notes"),
+                "transcript_url": call.get("transcript_url"), "recording_url": call.get("recording_url"), "line_items": line_items,
             }
-        results.append({
-            "call_id": call["id"],
-            "company_id": call["company_id"],
-            "company_name": company["name"],
-            "persona": company["persona"],
-            "status": call["status"],
-            "quote": quote_data,
-            "updated_at": call.get("updated_at")
-        })
+        results.append({"call_id": call["id"], "company_id": call["company_id"], "company_name": company["name"], "persona": company.get("persona", "Unknown"), "status": call["status"], "quote": quote_data, "updated_at": call.get("updated_at")})
     return results
 
+def _quote_for_call(call: dict) -> dict:
+    response = supabase_client.table("quotes").select("*").eq("call_id", call["id"]).execute()
+    if response.data:
+        return response.data[0]
+    quote = {"id": str(uuid.uuid4()), "call_id": call["id"], "company_id": call["company_id"], "spec_id": call["spec_id"], "outcome": "quote", "pricing_model": "flat", "initial_total": 0, "final_total": 0, "conditions": [], "red_flags": []}
+    supabase_client.table("quotes").insert(quote).execute()
+    return quote
+
 def db_log_quote_item(call_id: str, label: str, amount: float, disclosed_voluntarily: bool, negotiable: bool) -> dict:
-    call_resp = supabase_client.table("calls").select("*").eq("id", call_id).execute()
-    if not call_resp.data:
+    response = supabase_client.table("calls").select("*").eq("id", call_id).execute()
+    if not response.data:
         raise Exception(f"Call session {call_id} not found")
-    call = call_resp.data[0]
-    
+    call = response.data[0]
     if call["status"] == "queued":
         supabase_client.table("calls").update({"status": "calling"}).eq("id", call_id).execute()
-        
-    quote_resp = supabase_client.table("quotes").select("*").eq("call_id", call_id).execute()
-    if quote_resp.data:
-        quote = quote_resp.data[0]
-    else:
-        quote_id = f"quote_{call_id}"
-        supabase_client.table("quotes").insert({
-            "id": quote_id,
-            "call_id": call_id,
-            "company_id": call["company_id"],
-            "spec_id": call["spec_id"],
-            "outcome": "quote",
-            "pricing_model": "flat",
-            "opening_total": 0.0,
-            "final_total": 0.0,
-            "total": 0.0,
-            "created_at": datetime.utcnow().isoformat()
-        }).execute()
-        quote = {"id": quote_id, "opening_total": 0.0}
-        
-    supabase_client.table("quote_items").insert({
-        "quote_id": quote["id"],
-        "call_id": call_id,
-        "label": label,
-        "amount": amount,
-        "disclosed_voluntarily": disclosed_voluntarily,
-        "negotiable": negotiable,
-        "created_at": datetime.utcnow().isoformat()
-    }).execute()
-    
-    items_resp = supabase_client.table("quote_items").select("amount").eq("quote_id", quote["id"]).execute()
-    calculated_total = sum(item["amount"] for item in items_resp.data)
-    
-    update_data = {
-        "total": calculated_total,
-        "final_total": calculated_total
-    }
-    if quote.get("opening_total") == 0.0:
-        update_data["opening_total"] = calculated_total
-        
-    supabase_client.table("quotes").update(update_data).eq("id", quote["id"]).execute()
-    return {
-        "success": True,
-        "current_quote_total": calculated_total
-    }
+    quote = _quote_for_call(call)
+    supabase_client.table("quote_items").insert({"id": str(uuid.uuid4()), "call_id": call_id, "label": label, "amount": amount, "disclosed_voluntarily": disclosed_voluntarily, "negotiable": negotiable}).execute()
+    items = supabase_client.table("quote_items").select("amount").eq("call_id", call_id).execute().data
+    total = sum(float(item["amount"]) for item in items)
+    update = {"final_total": total}
+    if not quote.get("initial_total"):
+        update["initial_total"] = total
+    supabase_client.table("quotes").update(update).eq("id", quote["id"]).execute()
+    return {"success": True, "current_quote_total": total}
 
 def db_get_best_bid(spec_id: str, exclude_company: str = None) -> dict:
-    # Fetch all quotes with outcome='quote'
-    quotes_resp = supabase_client.table("quotes").select("*").eq("spec_id", spec_id).eq("outcome", "quote").execute()
-    if not quotes_resp.data:
+    quotes = supabase_client.table("quotes").select("*").eq("spec_id", spec_id).eq("outcome", "quote").execute().data
+    companies = {row["id"]: row["name"] for row in supabase_client.table("companies").select("id,name").execute().data}
+    eligible = [(float(quote["final_total"]), companies.get(quote["company_id"], "")) for quote in quotes if quote.get("final_total") and (not exclude_company or exclude_company.lower() not in companies.get(quote["company_id"], "").lower())]
+    if not eligible:
         return {"best_bid": None, "company_name": None}
-
-    # Get company names for those quotes
-    company_ids = list({q["company_id"] for q in quotes_resp.data if q.get("company_id")})
-    if not company_ids:
-        return {"best_bid": None, "company_name": None}
-    companies_resp = supabase_client.table("companies").select("id, name").in_("id", company_ids).execute()
-    comp_name_map = {c["id"]: c["name"] for c in companies_resp.data}
-
-    best_bid = None
-    best_company = None
-    for q in quotes_resp.data:
-        comp_name = comp_name_map.get(q["company_id"], "")
-        if exclude_company and exclude_company.lower() in comp_name.lower():
-            continue
-        total = q.get("final_total") or q.get("total")
-        if total is not None and total > 0:
-            if best_bid is None or total < best_bid:
-                best_bid = total
-                best_company = comp_name
-    return {
-        "best_bid": best_bid,
-        "company_name": best_company
-    }
+    best_bid, company_name = min(eligible, key=lambda item: item[0])
+    return {"best_bid": best_bid, "company_name": company_name}
 
 def db_log_outcome(call_id: str, data: dict, run_red_flags_fn) -> dict:
-    call_resp = supabase_client.table("calls").select("*").eq("id", call_id).execute()
-    if not call_resp.data:
+    response = supabase_client.table("calls").select("*").eq("id", call_id).execute()
+    if not response.data:
         raise Exception(f"Call session {call_id} not found")
-    call = call_resp.data[0]
-    
-    quote_resp = supabase_client.table("quotes").select("*").eq("call_id", call_id).execute()
-    if quote_resp.data:
-        quote = quote_resp.data[0]
-    else:
-        quote_id = f"quote_{call_id}"
-        supabase_client.table("quotes").insert({
-            "id": quote_id,
-            "call_id": call_id,
-            "company_id": call["company_id"],
-            "spec_id": call["spec_id"],
-            "outcome": data["outcome"],
-            "opening_total": 0.0,
-            "created_at": datetime.utcnow().isoformat()
-        }).execute()
-        quote = {"id": quote_id, "opening_total": 0.0}
-        
-    incoming_total = data.get("total") if data.get("total") is not None else data.get("final_total")
-    update_data = {
-        "outcome": data["outcome"],
-        "pricing_model": data.get("pricing_model") or "flat",
-        "moved_because": data.get("moved_because"),
-        "conditions": data.get("conditions") or [],
-        "notes": data.get("notes"),
-        "callback_contact": data.get("callback_contact"),
-        "callback_window": data.get("callback_window"),
-        "transcript_url": data.get("transcript_url"),
-        "recording_url": data.get("recording_url")
-    }
-    if incoming_total is not None:
-        update_data["total"] = incoming_total
-        update_data["final_total"] = incoming_total
+    call = response.data[0]
+    quote = _quote_for_call(call)
+    final_total = data.get("final_total") if data.get("final_total") is not None else data.get("total")
+    update = {"outcome": data["outcome"], "pricing_model": data.get("pricing_model") or "flat", "conditions": data.get("conditions") or [], "notes": data.get("notes"), "callback_contact": data.get("callback_contact"), "callback_window": data.get("callback_window")}
+    if final_total is not None:
+        update["final_total"] = final_total
     if data.get("opening_total") is not None:
-        update_data["opening_total"] = data["opening_total"]
-    elif quote.get("opening_total") is None or quote.get("opening_total") == 0.0:
-        update_data["opening_total"] = incoming_total or 0.0
-    if data.get("final_total") is not None:
-        update_data["final_total"] = data["final_total"]
-        update_data["total"] = data["final_total"]
-
-    supabase_client.table("quotes").update(update_data).eq("id", quote["id"]).execute()
-    
-    # Load spec and items for red flags
-    spec_resp = supabase_client.table("specs").select("*").eq("id", call["spec_id"]).execute()
-    spec_dict = from_flat_spec(spec_resp.data[0])
-    
-    items_resp = supabase_client.table("quote_items").select("*").eq("quote_id", quote["id"]).execute()
-    items_list = [{"label": item["label"], "amount": item["amount"]} for item in items_resp.data]
-    
-    quote_dict = {
-        "total": update_data.get("total") or quote.get("total"),
-        "final_total": update_data.get("final_total") or quote.get("final_total"),
-        "opening_total": update_data.get("opening_total") or quote.get("opening_total"),
-        "outcome": update_data["outcome"],
-        "pricing_model": update_data["pricing_model"],
-        "conditions": update_data["conditions"],
-        "notes": update_data["notes"]
-    }
-    red_flags, red_flag_reasons = run_red_flags_fn(spec_dict, quote_dict, items_list)
-    
-    supabase_client.table("quotes").update({
-        "red_flags": red_flags,
-        "red_flag_reasons": red_flag_reasons
-    }).eq("id", quote["id"]).execute()
-    
-    supabase_client.table("calls").update({
-        "status": "done",
-        "updated_at": datetime.utcnow().isoformat()
-    }).eq("id", call_id).execute()
-    
-    return {
-        "success": True,
-        "quote_id": quote["id"],
-        "red_flags": red_flags,
-        "red_flag_reasons": red_flag_reasons
-    }
-
+        update["initial_total"] = data["opening_total"]
+    elif not quote.get("initial_total") and final_total is not None:
+        update["initial_total"] = final_total
+    supabase_client.table("quotes").update(update).eq("id", quote["id"]).execute()
+    spec = db_get_spec(call["spec_id"])
+    items = supabase_client.table("quote_items").select("*").eq("call_id", call_id).execute().data
+    line_items = [{"label": item["label"], "amount": float(item["amount"])} for item in items]
+    quote_for_rules = {"total": update.get("final_total", quote.get("final_total")), "final_total": update.get("final_total", quote.get("final_total")), "opening_total": update.get("initial_total", quote.get("initial_total")), "outcome": update["outcome"], "pricing_model": update["pricing_model"], "conditions": update["conditions"], "notes": update["notes"] or ""}
+    red_flags, red_flag_reasons = run_red_flags_fn(spec or {}, quote_for_rules, line_items)
+    supabase_client.table("quotes").update({"red_flags": red_flags}).eq("id", quote["id"]).execute()
+    call_update = {"status": "declined" if data["outcome"] == "declined" else "done", "updated_at": datetime.utcnow().isoformat()}
+    if data.get("transcript_url"):
+        call_update["transcript_url"] = data["transcript_url"]
+    if data.get("recording_url"):
+        call_update["recording_url"] = data["recording_url"]
+    supabase_client.table("calls").update(call_update).eq("id", call_id).execute()
+    return {"success": True, "quote_id": quote["id"], "red_flags": red_flags, "red_flag_reasons": red_flag_reasons}
 
 def init_db():
-    """
-    Initialize Supabase by ensuring the three companies exist.
-    This is idempotent – run it once at startup.
-    """
-    try:
-        # Check if companies already exist
-        resp = supabase_client.table("companies").select("id").limit(1).execute()
-        if not resp.data:
-            logger.info("Seeding companies in Supabase...")
-            companies = [
-                {"id": "company_1", "name": "Apex Cleaning Co", "persona": "Premium"},
-                {"id": "company_2", "name": "Budget Cleaners", "persona": "Lowballer"},
-                {"id": "company_3", "name": "Sparkle & Shine", "persona": "Upseller"}
-            ]
-            supabase_client.table("companies").insert(companies).execute()
-            logger.info("Companies seeded successfully.")
-        else:
-            logger.info("Companies already exist, skipping seed.")
-    except Exception as e:
-        logger.error(f"Error initializing Supabase: {e}")
-        raise
+    """Ensure the three role-play companies exist; compatible with UUID primary keys."""
+    response = supabase_client.table("companies").select("id").limit(1).execute()
+    if not response.data:
+        supabase_client.table("companies").insert([
+            {"name": "Apex Cleaning Co", "persona": "Premium"},
+            {"name": "Budget Cleaners", "persona": "Lowballer"},
+            {"name": "Sparkle & Shine", "persona": "Upseller"},
+        ]).execute()
 
 # Call init_db when the module is loaded (optional)
 # We'll call it explicitly from main.py on startup.

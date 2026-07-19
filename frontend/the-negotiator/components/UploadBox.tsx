@@ -69,7 +69,7 @@ export default function UploadBox({ onFileSelected, selectedFile, onClear }: Upl
         <p className="font-body text-sm font-medium text-ticket">
           Drag &amp; drop your cleaning spec
         </p>
-        <p className="mt-1 font-mono text-xs text-graphite-400">PDF, JPG, PNG, or DOC &middot; up to 20MB</p>
+        <p className="mt-1 font-mono text-xs text-graphite-400">PDF, JPG, PNG, or WEBP &middot; up to 20MB</p>
       </div>
       <span className="mt-2 rounded-sm border border-graphite-400/60 px-4 py-2 font-mono text-xs uppercase tracking-widest text-graphite-200 transition hover:border-amber hover:text-amber">
         Choose file
@@ -77,7 +77,7 @@ export default function UploadBox({ onFileSelected, selectedFile, onClear }: Upl
       <input
         ref={inputRef}
         type="file"
-        accept=".pdf,.png,.jpg,.jpeg,.doc,.docx"
+        accept=".pdf,.png,.jpg,.jpeg,.webp"
         className="hidden"
         onChange={(e) => {
           const file = e.target.files?.[0];

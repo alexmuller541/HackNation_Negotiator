@@ -1,253 +1,173 @@
-// ---------------------------------------------------------------------------
-// THE NEGOTIATOR — API LAYER
-// ---------------------------------------------------------------------------
-// This is the ONE file that talks to the backend. Every page/component in
-// this app calls a function from here — never `fetch` directly from a page.
-// That means: when the backend team hands you real endpoints, you plug them
-// in HERE and every screen updates automatically.
-//
-// HOW TO WIRE IN THE REAL BACKEND
-// 1. Set NEXT_PUBLIC_API_BASE_URL in .env.local to the backend's base URL,
-//    e.g. NEXT_PUBLIC_API_BASE_URL=https://api.thenegotiator.app
-// 2. Set NEXT_PUBLIC_USE_MOCKS=false in .env.local.
-// 3. Each function below has a `// BACKEND CALL` block already written for
-//    the endpoint shape described in the project brief — uncomment/adjust
-//    the fetch and delete the corresponding mock call beneath it.
-//
-// Until then, USE_MOCKS=true (the default) makes the whole app runnable and
-// demo-able with realistic fake data and network-like delays, so frontend
-// work never blocks on the backend being ready.
-// ---------------------------------------------------------------------------
-
 import type {
+  BackendSpec,
+  CallTranscript,
+  CompanyCall,
   JobSpec,
   NegotiationProgress,
   QuoteReport,
-  CallTranscript,
-  CompanyCall,
 } from "./types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
-const USE_MOCKS = process.env.NEXT_PUBLIC_USE_MOCKS !== "false";
-
-function delay<T>(value: T, ms = 900): Promise<T> {
-  return new Promise((resolve) => setTimeout(() => resolve(value), ms));
-}
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+// Mocks are now opt-in. Set NEXT_PUBLIC_USE_MOCKS=true only for a visual-only fallback.
+const USE_MOCKS = process.env.NEXT_PUBLIC_USE_MOCKS === "true";
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
-  if (!res.ok) {
-    throw new Error(`API ${path} failed: ${res.status} ${res.statusText}`);
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `API ${path} failed (${response.status})`);
   }
-  return res.json();
+  return response.json() as Promise<T>;
 }
 
-// ---------------------------------------------------------------------------
-// 1. UPLOAD  —  POST /upload  (multipart/form-data, field name: "file")
-//    Returns: { jobId: string }
-// ---------------------------------------------------------------------------
+function displayCleaningType(value: string) {
+  return value === "move_out" ? "Move-out Cleaning" : `${value[0].toUpperCase()}${value.slice(1)} Cleaning`;
+}
+
+function toJobSpec(spec: BackendSpec): JobSpec {
+  return {
+    jobId: spec.id,
+    status: spec.confirmed_by_user ? "confirmed" : "ready_for_review",
+    cleaningType: displayCleaningType(spec.clean_type),
+    houseSizeSqft: spec.property.sqft,
+    bedrooms: spec.property.bedrooms,
+    bathrooms: spec.property.bathrooms,
+    furniture: [],
+    specialNotes: spec.open_questions?.join(" ") ?? "",
+    sourceFileName: spec.intake_source === "document" ? "uploaded document" : "voice interview",
+    backend: spec,
+  };
+}
+
+function cleanType(value: string): BackendSpec["clean_type"] {
+  if (value.toLowerCase().includes("move")) return "move_out";
+  if (value.toLowerCase().includes("deep")) return "deep";
+  return "standard";
+}
+
+function toBackendSpec(spec: JobSpec): Omit<BackendSpec, "id" | "created_at"> {
+  const base = spec.backend;
+  return {
+    property: {
+      type: base?.property.type ?? "house",
+      sqft: spec.houseSizeSqft,
+      bedrooms: spec.bedrooms,
+      bathrooms: spec.bathrooms,
+      levels: base?.property.levels ?? 1,
+    },
+    clean_type: cleanType(spec.cleaningType),
+    frequency: base?.frequency ?? "one_time",
+    condition: base?.condition ?? { clutter_level: "medium", has_pets: false, weeks_since_last_clean: 0 },
+    add_ons: base?.add_ons ?? { fridge: false, oven: false, windows: false, baseboards: false, laundry: false },
+    access: base?.access ?? { parking: "street", entry_method: "to be confirmed", walk_up_floor: 0 },
+    schedule: base?.schedule ?? { preferred_date: "", preferred_time_window: "to be confirmed", flexibility: null },
+    open_questions: spec.specialNotes ? [spec.specialNotes] : [],
+    confirmed_by_user: base?.confirmed_by_user ?? false,
+    intake_source: base?.intake_source ?? "document",
+  };
+}
+
+function toCompanyCall(call: any): CompanyCall {
+  const quote = call.quote;
+  const backendStatus = String(call.status ?? "queued");
+  const status: CompanyCall["status"] =
+    backendStatus === "done" ? "completed" : backendStatus === "queued" ? "waiting" : backendStatus === "declined" ? "declined" : "calling";
+  return {
+    companyId: call.company_id,
+    companyName: call.company_name,
+    status,
+    price: quote?.final_total ?? quote?.total ?? null,
+    extraCharges: quote?.line_items?.map((item: { label: string }) => item.label) ?? [],
+    callOutcome: quote?.outcome,
+    redFlag: Boolean(quote?.red_flags?.length),
+    startedAt: call.updated_at,
+    completedAt: status === "completed" ? call.updated_at : undefined,
+    notes: quote?.notes,
+    transcriptUrl: quote?.transcript_url,
+    recordingUrl: quote?.recording_url,
+  };
+}
+
 export async function uploadJobDocument(file: File): Promise<{ jobId: string }> {
-  if (!USE_MOCKS) {
-    // BACKEND CALL
-    const form = new FormData();
-    form.append("file", file);
-    const res = await fetch(`${API_BASE}/upload`, { method: "POST", body: form });
-    if (!res.ok) throw new Error("Upload failed");
-    return res.json();
-  }
-  return delay({ jobId: "job_" + Math.random().toString(36).slice(2, 8) }, 800);
+  if (USE_MOCKS) return { jobId: "demo-cleaning-job" };
+  const form = new FormData();
+  form.append("file", file);
+  const response = await fetch(`${API_BASE}/intake/doc`, { method: "POST", body: form });
+  if (!response.ok) throw new Error(await response.text());
+  const payload = (await response.json()) as { id: string };
+  return { jobId: payload.id };
 }
 
-// ---------------------------------------------------------------------------
-// 2. GET JOB SPEC  —  GET /job/:jobId
-//    Returns the extracted JobSpec. Poll this on the Processing page until
-//    status moves from "extracting" -> "ready_for_review".
-// ---------------------------------------------------------------------------
 export async function getJobSpec(jobId: string): Promise<JobSpec> {
-  if (!USE_MOCKS) {
-    // BACKEND CALL
-    return http<JobSpec>(`/job/${jobId}`);
-  }
-  return delay(mockJobSpec(jobId), 700);
+  if (USE_MOCKS) throw new Error("Mock mode has been retired; start the backend or unset NEXT_PUBLIC_USE_MOCKS.");
+  return toJobSpec(await http<BackendSpec>(`/specs/${jobId}`));
 }
 
-// ---------------------------------------------------------------------------
-// 3. UPDATE JOB SPEC  —  PUT /job/:jobId
-//    Sent when the user edits a field on the Review page before confirming.
-// ---------------------------------------------------------------------------
 export async function updateJobSpec(jobId: string, patch: Partial<JobSpec>): Promise<JobSpec> {
-  if (!USE_MOCKS) {
-    // BACKEND CALL
-    return http<JobSpec>(`/job/${jobId}`, { method: "PUT", body: JSON.stringify(patch) });
-  }
-  return delay({ ...mockJobSpec(jobId), ...patch }, 400);
+  const current = await getJobSpec(jobId);
+  const next = { ...current, ...patch, jobId };
+  const saved = await http<BackendSpec>(`/specs/${jobId}`, {
+    method: "PUT",
+    body: JSON.stringify(toBackendSpec(next)),
+  });
+  return toJobSpec(saved);
 }
 
-// ---------------------------------------------------------------------------
-// 4. CONFIRM & START NEGOTIATION  —  POST /job/:jobId/confirm
-//    Fired by the "Start Negotiation" button on the Review page.
-// ---------------------------------------------------------------------------
 export async function confirmJobSpec(jobId: string): Promise<{ started: boolean }> {
-  if (!USE_MOCKS) {
-    // BACKEND CALL
-    return http<{ started: boolean }>(`/job/${jobId}/confirm`, { method: "POST" });
-  }
-  return delay({ started: true }, 500);
+  await http<BackendSpec>(`/specs/${jobId}/confirm`, { method: "PATCH" });
+  return { started: true };
 }
 
-// ---------------------------------------------------------------------------
-// 5. NEGOTIATION PROGRESS  —  GET /job/:jobId/negotiation
-//    Poll this every ~2s on the Negotiation Progress page (or swap for a
-//    WebSocket/Socket.io subscription — see lib/useNegotiationSocket.ts stub
-//    at the bottom of this file for where that would plug in instead).
-// ---------------------------------------------------------------------------
 export async function getNegotiationProgress(jobId: string): Promise<NegotiationProgress> {
-  if (!USE_MOCKS) {
-    // BACKEND CALL
-    return http<NegotiationProgress>(`/job/${jobId}/negotiation`);
-  }
-  return delay(mockProgress(jobId), 300);
+  const calls = await http<any[]>(`/calls?spec_id=${encodeURIComponent(jobId)}`);
+  const companies = calls.map(toCompanyCall);
+  return {
+    jobId,
+    companies,
+    callsCompleted: companies.filter((company) => company.status === "completed" || company.status === "declined").length,
+    callsTotal: companies.length,
+  };
 }
 
-// ---------------------------------------------------------------------------
-// 6. FINAL REPORT / QUOTES  —  GET /job/:jobId/report  (brief calls this
-//    GET /quotes — adjust the path to whatever the backend team ships)
-// ---------------------------------------------------------------------------
 export async function getQuoteReport(jobId: string): Promise<QuoteReport> {
-  if (!USE_MOCKS) {
-    // BACKEND CALL
-    return http<QuoteReport>(`/job/${jobId}/report`);
-  }
-  return delay(mockReport(jobId), 700);
+  const [report, progress] = await Promise.all([
+    http<any>(`/report/${jobId}`),
+    getNegotiationProgress(jobId),
+  ]);
+  const quotes = report.quotes ?? [];
+  const recommended = report.recommended_deal;
+  const bestQuote = recommended
+    ? {
+        companyId: quotes.find((quote: any) => quote.id === recommended.quote_id)?.company_id ?? "",
+        companyName: recommended.company_name,
+        price: recommended.total,
+      }
+    : null;
+  const prices = progress.companies.map((company) => company.price).filter((price): price is number => price != null);
+  return {
+    jobId,
+    companies: progress.companies,
+    bestQuote,
+    averagePrice: prices.length ? Math.round(prices.reduce((sum, price) => sum + price, 0) / prices.length) : null,
+    warnings: quotes.flatMap((quote: any) => quote.red_flag_reasons ?? []),
+  };
 }
 
-// ---------------------------------------------------------------------------
-// 7. COMPANY DETAIL  —  GET /job/:jobId/company/:companyId
-// ---------------------------------------------------------------------------
 export async function getCompanyDetail(jobId: string, companyId: string): Promise<CompanyCall> {
-  if (!USE_MOCKS) {
-    // BACKEND CALL
-    return http<CompanyCall>(`/job/${jobId}/company/${companyId}`);
-  }
-  const report = mockReport(jobId);
-  const found = report.companies.find((c) => c.companyId === companyId);
-  return delay(found ?? report.companies[0], 400);
+  const progress = await getNegotiationProgress(jobId);
+  const company = progress.companies.find((item) => item.companyId === companyId);
+  if (!company) throw new Error("Company call was not found");
+  return company;
 }
 
-// ---------------------------------------------------------------------------
-// 8. CALL TRANSCRIPT (optional page)  —  GET /job/:jobId/company/:companyId/transcript
-// ---------------------------------------------------------------------------
 export async function getCallTranscript(jobId: string, companyId: string): Promise<CallTranscript> {
-  if (!USE_MOCKS) {
-    // BACKEND CALL
-    return http<CallTranscript>(`/job/${jobId}/company/${companyId}/transcript`);
-  }
-  return delay(mockTranscript(companyId), 500);
-}
-
-// ===========================================================================
-// MOCK DATA GENERATORS — everything below exists only so the app runs before
-// the backend is ready. Safe to delete once NEXT_PUBLIC_USE_MOCKS=false.
-// ===========================================================================
-
-function mockJobSpec(jobId: string): JobSpec {
-  return {
-    jobId,
-    status: "ready_for_review",
-    cleaningType: "Deep Cleaning",
-    houseSizeSqft: 2200,
-    bedrooms: 4,
-    bathrooms: 3,
-    furniture: ["Sofa", "Dining Table", "Wardrobe", "King Bed", "TV Console"],
-    specialNotes: "Kitchen cleaning needs extra attention around the stove hood.",
-    sourceFileName: "cleaning-spec.pdf",
-  };
-}
-
-const MOCK_COMPANIES: Omit<CompanyCall, "status" | "price">[] = [
-  { companyId: "c1", companyName: "ABC Cleaning", phone: "+1 415 555 0142" },
-  { companyId: "c2", companyName: "Spark Clean", phone: "+1 415 555 0198" },
-  { companyId: "c3", companyName: "Fresh Home", phone: "+1 415 555 0176" },
-  { companyId: "c4", companyName: "Home Care Co.", phone: "+1 415 555 0133" },
-  { companyId: "c5", companyName: "Bright Nest", phone: "+1 415 555 0119" },
-];
-
-let progressTick = 0;
-function mockProgress(jobId: string): NegotiationProgress {
-  progressTick += 1;
-  const completedCount = Math.min(MOCK_COMPANIES.length, Math.floor(progressTick / 2));
-  const companies: CompanyCall[] = MOCK_COMPANIES.map((c, i) => {
-    if (i < completedCount) {
-      return { ...c, status: i === 3 ? "declined" : "completed", price: i === 3 ? null : 210 + i * 10 };
-    }
-    if (i === completedCount) {
-      return { ...c, status: "calling", price: null };
-    }
-    return { ...c, status: "waiting", price: null };
-  });
-  return {
-    jobId,
-    companies,
-    callsCompleted: completedCount,
-    callsTotal: MOCK_COMPANIES.length,
-  };
-}
-
-function mockReport(jobId: string): QuoteReport {
-  const companies: CompanyCall[] = [
-    { ...MOCK_COMPANIES[0], status: "completed", price: 220, travelFee: "included", extraCharges: ["Window Cleaning"], callOutcome: "Quote received" },
-    { ...MOCK_COMPANIES[1], status: "completed", price: 210, travelFee: "included", extraCharges: [], callOutcome: "Quote received" },
-    { ...MOCK_COMPANIES[2], status: "completed", price: 250, travelFee: "extra", extraCharges: ["Deep grout scrub"], callOutcome: "Quote received" },
-    { ...MOCK_COMPANIES[3], status: "declined", price: null, callOutcome: "Declined — outside service area" },
-    { ...MOCK_COMPANIES[4], status: "completed", price: 130, travelFee: "included", extraCharges: [], callOutcome: "Quote received", redFlag: true },
+  const company = await getCompanyDetail(jobId, companyId);
+  const lines = [
+    { speaker: "agent" as const, text: "Structured call record captured by The Negotiator." },
+    { speaker: "company" as const, text: company.callOutcome ? `Outcome: ${company.callOutcome}${company.price != null ? ` — $${company.price}` : ""}.` : "The call is still in progress." },
   ];
-  const priced = companies.filter((c) => c.price != null) as (CompanyCall & { price: number })[];
-  const best = priced.reduce((min, c) => (c.price < min.price ? c : min), priced[0]);
-  const avg = priced.reduce((sum, c) => sum + c.price, 0) / priced.length;
-  const warnings: string[] = [];
-  const flagged = priced.filter((c) => c.redFlag || c.price < avg * 0.6);
-  flagged.forEach((c) => {
-    warnings.push(`${c.companyName}'s quote ($${c.price}) is ${Math.round((1 - c.price / avg) * 100)}% below the average. Possible red flag.`);
-  });
-  return {
-    jobId,
-    companies,
-    bestQuote: best ? { companyId: best.companyId, companyName: best.companyName, price: best.price } : null,
-    averagePrice: Math.round(avg),
-    warnings,
-  };
+  return { companyId, companyName: company.companyName, lines, transcriptUrl: company.transcriptUrl, recordingUrl: company.recordingUrl };
 }
-
-function mockTranscript(companyId: string): CallTranscript {
-  const name = MOCK_COMPANIES.find((c) => c.companyId === companyId)?.companyName ?? "Company";
-  return {
-    companyId,
-    companyName: name,
-    lines: [
-      { speaker: "agent", text: "Hi, this is calling on behalf of a customer looking for a deep clean quote for a 2,200 sq ft, 4-bedroom home. Do you have a moment?" },
-      { speaker: "company", text: "Sure, go ahead." },
-      { speaker: "agent", text: "Great — 4 bedrooms, 3 bathrooms, standard furniture, and some extra attention needed around the kitchen stove hood. What would that run?" },
-      { speaker: "company", text: "For that size, we'd quote around $250, travel included." },
-      { speaker: "agent", text: "We've had quotes closer to $210 for a comparable job. Is there any flexibility there?" },
-      { speaker: "company", text: "We could do $220 if you book this week." },
-      { speaker: "agent", text: "That works — can you confirm that's the full quote with no hidden fees?" },
-      { speaker: "company", text: "Yes, $220 flat, travel included." },
-    ],
-  };
-}
-
-// ---------------------------------------------------------------------------
-// OPTIONAL: swap polling for a live socket.
-// If the backend exposes Socket.io/WebSocket for negotiation progress
-// instead of a polling endpoint, replace calls to getNegotiationProgress()
-// on the Negotiation page with a hook like this:
-//
-//   useEffect(() => {
-//     const socket = io(API_BASE);
-//     socket.on(`negotiation:${jobId}`, (data: NegotiationProgress) => setProgress(data));
-//     return () => socket.disconnect();
-//   }, [jobId]);
-// ---------------------------------------------------------------------------

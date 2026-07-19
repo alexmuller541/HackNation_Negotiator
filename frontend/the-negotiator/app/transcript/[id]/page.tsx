@@ -46,6 +46,12 @@ function TranscriptContent() {
       </h1>
 
       <CallTimeline lines={transcript.lines} />
+      {(transcript.transcriptUrl || transcript.recordingUrl) && (
+        <div className="mt-6 flex gap-4 font-mono text-xs uppercase tracking-widest text-teal-light">
+          {transcript.transcriptUrl && <a href={transcript.transcriptUrl} target="_blank" rel="noreferrer">Open transcript</a>}
+          {transcript.recordingUrl && <a href={transcript.recordingUrl} target="_blank" rel="noreferrer">Play recording</a>}
+        </div>
+      )}
     </div>
   );
 }

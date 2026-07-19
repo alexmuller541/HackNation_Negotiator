@@ -1,6 +1,6 @@
 # The Negotiator
 
-Voice agents that call, compare, and haggle — ElevenLabs challenge, Hack-Nation 6th Global AI Hackathon. Vertical: **local moving**. Full plan in [PLAN.md](PLAN.md).
+Voice agents that call, compare, and negotiate — ElevenLabs challenge, Hack-Nation 6th Global AI Hackathon. The shipped vertical is **home cleaning**.
 
 ## Team roles
 
@@ -15,7 +15,7 @@ Voice agents that call, compare, and haggle — ElevenLabs challenge, Hack-Natio
 
 1. **Prompts are files.** Agents load system prompts from `prompts/` and config from `verticals/` — never hardcoded. Alex iterates on these from a phone; a merged PR changes agent behavior with zero code.
 2. **Schemas are the contract.** `schemas/job_spec.schema.json` and `schemas/quote.schema.json` — both intake paths produce the former, every call produces exactly one of the latter.
-3. **Backend is publicly reachable by hour 6** (deploy or ngrok) so ElevenLabs tool calls and phone-side testing work. Localhost-only blocks half the team.
+3. **Backend must be publicly reachable** (deploy or ngrok) before ElevenLabs tool calls can work. Localhost-only blocks voice testing.
 4. **Voice minutes are the scarce resource.** Iterate in text mode against `personas/` + `evals/golden-calls.md` first; dial only to verify.
 
 ## Repo layout
@@ -32,8 +32,15 @@ backend/      orchestrator, tool endpoints, ranking (B)
 frontend/     dashboard (A)
 ```
 
+## Run the integrated demo
+
+1. Copy `.env.example` to `.env` and add the existing shared Supabase URL/service key plus OpenAI key.
+2. In one terminal: `python3 -m venv .venv && .venv/bin/pip install -r backend/requirements.txt && .venv/bin/uvicorn backend.main:app --reload --port 8000`.
+3. In `frontend/the-negotiator`, set `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000` and leave `NEXT_PUBLIC_USE_MOCKS` unset (mocks are opt-in), then run `npm install && npm run dev`.
+4. Upload a PDF or image → review/confirm the generated spec → use the call board and report. Voice calls require a public backend URL and the corresponding ElevenLabs webhook updates in `elevenlabs/tools.md`.
+
 ## Working from a phone (Alex)
 
 Sessions run on [claude.ai/code](https://claude.ai/code) against this repo (needs the Claude GitHub app connected). Kickoff prompt to paste at the start of each session:
 
-> I'm working from my phone on the-negotiator repo (ElevenLabs "The Negotiator" hackathon — see PLAN.md). I own conversation design: prompts/, personas/, verticals/moving.yaml, evals/, demo/, docs/. The prompts are loaded as files by the agents, so my changes ship behavior. Read PLAN.md and docs/conversation-requirements.md first, keep edits inside my directories, and open a PR when done. This session's task: [TASK]
+> I'm working from my phone on the-negotiator repo (ElevenLabs "The Negotiator" hackathon). I own conversation design: prompts/, personas/, verticals/cleaning.yaml, evals/, demo/, docs/. The prompts are loaded as files by the agents, so my changes ship behavior. Keep the cleaning vertical consistent and open a PR when done. This session's task: [TASK]
