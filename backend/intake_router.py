@@ -3,7 +3,7 @@ intake_router.py — Aleks's intake backend for The Negotiator (cleaning vertica
 
 Two endpoints, written so Umra can drop them straight into the main FastAPI app:
 
-    POST /intake/doc   PDF or photo  -> Claude Vision -> DRAFT job_spec JSON,
+    POST /intake/doc   PDF or photo  -> OpenAI vision -> DRAFT job_spec JSON,
                        validated against the JobSpec model below, with every
                        still-missing required field flagged. Does NOT persist.
 
@@ -18,12 +18,12 @@ Plug-in (in Umra's app):
     app.include_router(intake_router)
 
 Environment variables (read lazily, so the module still imports without them):
-    ANTHROPIC_API_KEY      - Claude API key (vision extraction)
+    OPENAI_API_KEY         - OpenAI API key (vision extraction)
     SUPABASE_URL           - e.g. https://xxxx.supabase.co
     SUPABASE_SERVICE_KEY   - service-role key (server-side writes)
-    INTAKE_MODEL           - optional, defaults to claude-opus-4-8
+    INTAKE_MODEL           - optional, defaults to gpt-4o (any OpenAI vision model)
 
-Expected Supabase table (Umra owns the DB; create this to match the writes):
+Expected Supabase table (Umra owns the DB; see backend/db/schema.sql):
 
     create table specs (
         id                uuid primary key,
@@ -38,18 +38,19 @@ Expected Supabase table (Umra owns the DB; create this to match the writes):
 The confirm gate (PATCH /specs/{id}/confirm) is Umra's — this file never
 confirms a spec; it only drafts and persists.
 
-Dependencies: fastapi, anthropic, supabase, pydantic  (all pip-installable).
+Dependencies: fastapi, openai, supabase, pydantic  (all pip-installable).
 """
 from __future__ import annotations
 
 import base64
+import json
 import os
 import uuid
 from enum import Enum
 from typing import List, Optional
 
-import anthropic
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
+from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field, ValidationError
 from supabase import Client, create_client
 
@@ -58,8 +59,8 @@ router = APIRouter(tags=["intake"])
 # --------------------------------------------------------------------------- #
 # Config
 # --------------------------------------------------------------------------- #
-INTAKE_MODEL = os.environ.get("INTAKE_MODEL", "claude-opus-4-8")
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB raw (Anthropic caps the request at 32 MB after base64)
+INTAKE_MODEL = os.environ.get("INTAKE_MODEL", "gpt-4o")
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB raw
 _IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 _PDF_MEDIA_TYPE = "application/pdf"
 _EXT_TO_MEDIA = {
@@ -184,17 +185,17 @@ class SaveSpecResponse(BaseModel):
 # --------------------------------------------------------------------------- #
 # Lazy clients (so importing this module never requires credentials)
 # --------------------------------------------------------------------------- #
-_anthropic_client: Optional[anthropic.Anthropic] = None
+_openai_client: Optional[OpenAI] = None
 _supabase_client: Optional[Client] = None
 
 
-def _anthropic() -> anthropic.Anthropic:
-    global _anthropic_client
-    if _anthropic_client is None:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "ANTHROPIC_API_KEY is not set")
-        _anthropic_client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
-    return _anthropic_client
+def _openai() -> OpenAI:
+    global _openai_client
+    if _openai_client is None:
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "OPENAI_API_KEY is not set")
+        _openai_client = OpenAI()  # reads OPENAI_API_KEY from env
+    return _openai_client
 
 
 def _supabase() -> Client:
@@ -237,11 +238,14 @@ def _resolve_media_type(upload: UploadFile) -> str:
     )
 
 
-# Forced tool: guarantees Claude returns structured data matching JobSpec.
+# Forced OpenAI function call: guarantees a structured payload matching JobSpec.
 _EXTRACT_TOOL = {
-    "name": "record_cleaning_spec",
-    "description": "Record the cleaning job specification extracted from the document or photo.",
-    "input_schema": JobSpec.model_json_schema(),
+    "type": "function",
+    "function": {
+        "name": "record_cleaning_spec",
+        "description": "Record the cleaning job specification extracted from the document or photo.",
+        "parameters": JobSpec.model_json_schema(),
+    },
 }
 
 _EXTRACT_SYSTEM = (
@@ -257,36 +261,42 @@ _EXTRACT_SYSTEM = (
 def _extract_spec_from_file(raw: bytes, media_type: str) -> JobSpec:
     b64 = base64.standard_b64encode(raw).decode("utf-8")
     if media_type == _PDF_MEDIA_TYPE:
-        media_block = {"type": "document", "source": {"type": "base64", "media_type": _PDF_MEDIA_TYPE, "data": b64}}
+        media_block = {
+            "type": "file",
+            "file": {"filename": "upload.pdf", "file_data": f"data:application/pdf;base64,{b64}"},
+        }
     else:
-        media_block = {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}}
+        media_block = {
+            "type": "image_url",
+            "image_url": {"url": f"data:{media_type};base64,{b64}"},
+        }
 
     try:
-        resp = _anthropic().messages.create(
+        resp = _openai().chat.completions.create(
             model=INTAKE_MODEL,
-            max_tokens=2000,
-            system=_EXTRACT_SYSTEM,
+            max_completion_tokens=2000,
             tools=[_EXTRACT_TOOL],
-            tool_choice={"type": "tool", "name": "record_cleaning_spec"},
-            messages=[{
-                "role": "user",
-                "content": [
+            tool_choice={"type": "function", "function": {"name": "record_cleaning_spec"}},
+            messages=[
+                {"role": "system", "content": _EXTRACT_SYSTEM},
+                {"role": "user", "content": [
                     media_block,
                     {"type": "text", "text": "Extract the cleaning job spec from this file."},
-                ],
-            }],
+                ]},
+            ],
         )
-    except anthropic.APIError as e:
+    except OpenAIError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Vision extraction failed: {e}")
 
-    tool_input = next((b.input for b in resp.content if b.type == "tool_use"), None)
-    if tool_input is None:
+    tool_calls = resp.choices[0].message.tool_calls
+    if not tool_calls:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Vision model did not return a structured spec.")
 
     try:
+        tool_input = json.loads(tool_calls[0].function.arguments or "{}")
         spec = JobSpec.model_validate(tool_input)
-    except ValidationError as e:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Vision output failed validation: {e.errors()}")
+    except (ValidationError, ValueError) as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Vision output failed validation: {e}")
 
     spec.intake_source = IntakeSource.document
     spec.confirmed_by_user = False
@@ -298,7 +308,7 @@ def _extract_spec_from_file(raw: bytes, media_type: str) -> JobSpec:
 # --------------------------------------------------------------------------- #
 @router.post("/intake/doc", response_model=DraftSpecResponse)
 async def intake_doc(file: UploadFile = File(...)) -> DraftSpecResponse:
-    """Accept a PDF or photo, extract a DRAFT cleaning spec via Claude Vision,
+    """Accept a PDF or photo, extract a DRAFT cleaning spec via OpenAI vision,
     and flag missing required fields. Does not persist — the caller reviews the
     draft, then POSTs the (edited) spec to /specs to get a spec_id."""
     media_type = _resolve_media_type(file)
