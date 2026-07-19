@@ -1,6 +1,10 @@
 # ElevenLabs Dashboard Setup (phone-friendly, Alex's lane)
 
-> **STATUS: agents exist but must be reconfigured before demo.** The existing agent IDs are in [created.json](created.json). Their original moving prompts and placeholder webhook URL are not compatible with the merged cleaning backend. Update the prompts and tool URLs using [tools.md](tools.md) after the backend has a public HTTPS URL.
+> **STATUS: configured for the current public backend.** The existing agent IDs are in [created.json](created.json), and `configure_live.py` has pointed their tools at `https://flail-poker-decency.ngrok-free.dev`. Re-run the script only when the public URL changes.
+
+```bash
+BACKEND_URL=https://flail-poker-decency.ngrok-free.dev .venv/bin/python elevenlabs/configure_live.py --apply
+```
 >
 > **Person D:** the four tools point at placeholder URLs (`backend-placeholder.negotiator.example`) — update each tool's URL via dashboard or API once the backend is deployed. Voice is the stock demo voice; pick better ones in the dashboard (free).
 
@@ -28,3 +32,10 @@ All of this is **free to configure** — only conversation minutes burn credits.
 - One ~60s sanity call after setup to confirm the account/voice pipeline works. Then stop until the backend is deployed (hour-6 checkpoint).
 - Tool calls fail until Person B's endpoints are publicly reachable — don't burn minutes testing tools against localhost.
 - Keep every good recording — demo backup material.
+
+## Caller handoff (required for a real call)
+
+1. The interviewer’s `save_job_spec` tool returns the `spec_id`.
+2. Confirm it with `PATCH /specs/{spec_id}/confirm`, then fetch `GET /calls?spec_id={spec_id}`.
+3. For each company, call `POST /calls/start` with the `spec_id` and `company_id`. Pass the returned `call_id` to the caller agent as a dynamic variable, alongside `spec_id`, `company_name`, and `job_spec_json` (the confirmed spec JSON).
+4. The caller can now log line items and the outcome; the closer may use `get_best_bid` after another completed quote exists.
