@@ -1,4 +1,4 @@
-# ElevenLabs Dashboard Setup (phone-friendly, Alex's lane)
+# ElevenLabs Dashboard Setup (Alex's lane)
 
 > **STATUS: configured for the current public backend.** The existing agent IDs are in [created.json](created.json), and `configure_live.py` has pointed their tools at `https://flail-poker-decency.ngrok-free.dev`. Re-run the script only when the public URL changes.
 

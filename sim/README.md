@@ -40,8 +40,8 @@ A full run is **$0.03–0.05**. The whole 4-persona sweep is under $0.20. Overri
 
 Known gaps to iterate on: lowballer's second hidden fee ($150 fuel/materials) was not extracted, and his cash-deposit demand wasn't logged as a condition (so that red flag didn't fire). See `evals/golden-calls.md` case 1.
 
-## Iterating (Alex's loop, works from a phone via Claude Code web)
+## Iterating (Alex's loop)
 
 1. Edit `prompts/caller.md` or a persona card.
-2. Run the sim against the affected personas (or ask a Claude Code session on the repo to).
+2. Run the sim against the affected personas.
 3. Check the eval summary against `evals/golden-calls.md` — cases 2, 3, 5, and 10 must pass before any demo recording.
